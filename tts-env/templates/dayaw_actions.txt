@@ -1,0 +1,8 @@
+[ACTION: wave]
+Siya si Dayaw, ang pinakamatapang na mandirigma ng lalawigan.
+
+[ACTION: guard]
+Naramdaman ni Dayaw ang pangangatog ng lupa. Mabilis niyang hinawakan ang kampilan at lumabas sa gitna ng nayon.
+
+[ACTION: jump]
+Tumakbo si Dayaw patungo sa mataas na talampas upang harapin ang Bakunawa.

@@ -1,0 +1,44 @@
+services:
+  tts-env:
+    build:
+      context: ./tts-env
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      NARRATOR_GENDER: "${NARRATOR_GENDER:-female}"
+      AUDIO_ONLY: "${AUDIO_ONLY:-false}"
+    volumes:
+      - ./inputs:/app/inputs:ro
+      - ./output:/app/output
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    command: ["bash"]
+
+  torchserve:
+    build:
+      context: ./AnimatedDrawings/torchserve
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+  animated-drawings:
+    build:
+      context: ./AnimatedDrawings
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    depends_on:
+      torchserve:
+        condition: service_healthy
+    environment:
+      ANIMATED_DRAWINGS_TORCHSERVE_URL: http://torchserve:8080
+      ANIMATED_DRAWINGS_USE_MESA: "true"
+    volumes:
+      - ./AnimatedDrawings/inputs:/workspace/inputs:ro
+      - ./AnimatedDrawings/output:/workspace/output
+      - ./AnimatedDrawings/logs:/workspace/logs
+    working_dir: /workspace
+    entrypoint: ["python", "examples/image_to_animation.py"]

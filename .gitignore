@@ -1,2 +1,9 @@
+inputs/*
+!inputs/dayaw_actions.txt
+output/*
+!output/.gitkeep
+.env
+!.env.example
+
 tts-env/inputs/
 tts-env/output/
