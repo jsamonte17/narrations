@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# I-upgrade ang pip at i-install ang edge-tts, Pillow, at iba pang kinakailangang libraries
+# I-upgrade ang pip at i-install ang edge-tts, Pillow, NumPy, at iba pang kinakailangang libraries
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir edge-tts asyncio Pillow
+    pip install --no-cache-dir edge-tts asyncio Pillow numpy
 
 # Kopyahin ang iyong mga script o txt files sa container (opsyonal kung gagamitin mo ang current folder)
 COPY . /app

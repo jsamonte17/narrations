@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a short, original stickman animation from tagged script scenes."""
+"""Generate narrated audio or video from scripts, with optional ambient SFX."""
 
 import argparse
 import asyncio
@@ -9,11 +9,21 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from pathlib import Path
 
 import edge_tts
 from PIL import Image, ImageDraw, ImageFont
+
+if __package__:
+    from .brain_sfx import write_annotated_script
+    from .generate_ambient_sfx import PART_PATTERN, ensure_cue_assets, parse_parts
+    from .progress import progress_heartbeat, report_progress
+else:
+    from brain_sfx import write_annotated_script
+    from generate_ambient_sfx import PART_PATTERN, ensure_cue_assets, parse_parts
+    from progress import progress_heartbeat, report_progress
 
 
 WIDTH = 800
@@ -51,12 +61,27 @@ def parse_scenes(script_text):
 
 
 def parse_audio_scenes(script_text):
+    if PART_PATTERN.search(script_text):
+        parts = parse_parts(script_text)
+        headers = list(PART_PATTERN.finditer(script_text))
+        scenes = []
+        for index, (part_number, _, _) in enumerate(parts):
+            start = headers[index].end()
+            end = headers[index + 1].start() if index + 1 < len(headers) else len(script_text)
+            section = script_text[start:end]
+            section = re.sub(r"\(AMBIENT SFX:.*?\)", "", section, flags=re.IGNORECASE | re.DOTALL)
+            section = re.sub(r"(?m)^\s*#+\s*.*$", "", section)
+            narration = " ".join(section.split())
+            if not narration:
+                raise ValueError(f"Episode part {part_number} has no narration text.")
+            scenes.append(("wave", narration))
+        return scenes, parts
     if not TAG_PATTERN.search(script_text):
         narration = " ".join(script_text.split())
         if not narration:
             raise ValueError("The narration script is empty.")
-        return [("wave", narration)]
-    return parse_scenes(script_text)
+        return [("wave", narration)], None
+    return parse_scenes(script_text), None
 
 
 def clean_caption(text):
@@ -256,7 +281,28 @@ async def synthesize_scene_audio(scenes, voice, audio_directory):
     audio_paths = []
     for index, (_, narration) in enumerate(scenes):
         audio_path = audio_directory / f"scene_{index:04d}.mp3"
-        await edge_tts.Communicate(narration, voice).save(str(audio_path))
+        report_progress(f"Generating narration audio {index + 1}/{len(scenes)} with Edge TTS.")
+        started_at = time.monotonic()
+
+        async def report_elapsed(scene_number):
+            while True:
+                await asyncio.sleep(15)
+                elapsed = int(time.monotonic() - started_at)
+                report_progress(
+                    f"Edge TTS is still generating narration {scene_number}/{len(scenes)} "
+                    f"({elapsed}s elapsed)."
+                )
+
+        heartbeat = asyncio.create_task(report_elapsed(index + 1))
+        try:
+            await edge_tts.Communicate(narration, voice).save(str(audio_path))
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+        report_progress(f"Finished narration audio {index + 1}/{len(scenes)}.")
         audio_paths.append(audio_path)
     return audio_paths
 
@@ -308,6 +354,7 @@ def export_mp3(audio_paths, output_path, audio_directory):
             escaped_path = str(audio_path).replace("'", "'\\''")
             file.write(f"file '{escaped_path}'\n")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    report_progress(f"FFmpeg is assembling {len(audio_paths)} audio section(s) into {output_path}.")
     run_command(
         [
             "ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
@@ -315,6 +362,35 @@ def export_mp3(audio_paths, output_path, audio_directory):
             str(output_path),
         ]
     )
+    report_progress(f"FFmpeg finished MP3 export: {output_path}")
+
+
+def mix_ambient_with_narration(narration_path, ambience_paths, output_path):
+    report_progress(
+        f"FFmpeg is mixing {len(ambience_paths)} ambience track(s) with "
+        f"{narration_path.name}."
+    )
+    inputs = ["-i", str(narration_path)]
+    filters = []
+    mix_inputs = ["[0:a]"]
+    for index, ambience_path in enumerate(ambience_paths, start=1):
+        inputs.extend(["-stream_loop", "-1", "-i", str(ambience_path)])
+        filters.append(f"[{index}:a]volume=0.5[amb{index}]")
+        mix_inputs.append(f"[amb{index}]")
+    filters.append(
+        f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:"
+        "dropout_transition=0:normalize=0[mix]"
+    )
+    run_command(
+        [
+            "ffmpeg", "-y", "-v", "error",
+            *inputs,
+            "-filter_complex", ";".join(filters),
+            "-map", "[mix]", "-c:a", "libmp3lame", "-q:a", "3",
+            str(output_path),
+        ]
+    )
+    report_progress(f"Finished ambience mix: {output_path.name}")
 
 
 def render_video(scenes, durations, narration_path, output_path, frame_directory):
@@ -376,6 +452,11 @@ def main():
         default=os.environ.get("NARRATOR_GENDER", "female"),
         help="Narrator gender (female or male); defaults to NARRATOR_GENDER or female",
     )
+    parser.add_argument(
+        "--no-ai-sfx",
+        action="store_true",
+        help="Use the script's existing part-level SFX cues instead of local Ollama annotations",
+    )
     args = parser.parse_args()
     configured_audio_only = os.environ.get("AUDIO_ONLY", "false").strip().lower()
     if configured_audio_only not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
@@ -396,16 +477,68 @@ def main():
 
     try:
         script_text = script_path.read_text(encoding="utf-8")
-        scenes = parse_audio_scenes(script_text) if audio_only else parse_scenes(script_text)
+        episode_parts = None
+        use_ai_sfx = audio_only and PART_PATTERN.search(script_text) and not args.no_ai_sfx
+        report_progress(
+            f"Starting {'audio-only' if audio_only else 'video'} generation "
+            f"for {script_path}."
+        )
+        if audio_only and not use_ai_sfx:
+            scenes, episode_parts = parse_audio_scenes(script_text)
+        elif not audio_only:
+            scenes = parse_scenes(script_text)
         with tempfile.TemporaryDirectory(prefix="stickman-video-") as temporary_directory:
             temporary_path = Path(temporary_directory)
             audio_directory = temporary_path / "audio"
             audio_directory.mkdir()
+            if use_ai_sfx:
+                report_progress("AI SFX is enabled; Ollama will analyze the episode.")
+                brain_model = os.environ.get("BRAIN_MODEL", "qwen2.5:3b")
+                ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434")
+                visible_temporary_path = Path("temp")
+                visible_temporary_path.mkdir(parents=True, exist_ok=True)
+                annotated_script_path = (
+                    visible_temporary_path
+                    / f"{script_path.stem}_annotated_sfx.txt"
+                )
+                instruction_path = Path(
+                    os.environ.get("BRAIN_INSTRUCTIONS_FILE", "brain-instructions.md")
+                )
+                annotated_path = write_annotated_script(
+                    script_text,
+                    annotated_script_path,
+                    brain_model,
+                    ollama_url,
+                    instruction_path,
+                    Path("assets") / "sfx",
+                )
+                scenes, episode_parts = parse_audio_scenes(
+                    annotated_path.read_text(encoding="utf-8")
+                )
+                report_progress(
+                    f"Temporary annotations produced {len(scenes)} narration section(s)."
+                )
+            report_progress(f"Starting Edge TTS for {len(scenes)} narration section(s).")
             audio_paths = asyncio.run(
                 synthesize_scene_audio(scenes, voice, audio_directory)
             )
             if audio_only:
-                export_mp3(audio_paths, output_path, audio_directory)
+                if episode_parts is None:
+                    export_mp3(audio_paths, output_path, audio_directory)
+                else:
+                    mixed_paths = []
+                    for part_number, ((_, title, cue), narration_path) in enumerate(
+                        zip(episode_parts, audio_paths), start=1
+                    ):
+                        report_progress(
+                            f"Preparing ambience for section {part_number}/{len(episode_parts)}: "
+                            f"{title}."
+                        )
+                        ambience_paths = ensure_cue_assets(cue, Path("assets") / "sfx")
+                        mixed_path = audio_directory / f"mixed_{part_number:04d}.mp3"
+                        mix_ambient_with_narration(narration_path, ambience_paths, mixed_path)
+                        mixed_paths.append(mixed_path)
+                    export_mp3(mixed_paths, output_path, audio_directory)
             else:
                 frame_directory = temporary_path / "frames"
                 frame_directory.mkdir()
@@ -418,7 +551,7 @@ def main():
         print(f"Error: {error}", file=sys.stderr)
         return 1
     output_type = "MP3 narration" if audio_only else "narrated MP4"
-    print(f"Created {output_type} with {len(scenes)} scene(s): {output_path}")
+    report_progress(f"Created {output_type} with {len(scenes)} scene(s): {output_path}")
     return 0
 
 

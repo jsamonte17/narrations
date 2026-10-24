@@ -2,6 +2,11 @@ inputs/*
 !inputs/dayaw_actions.txt
 output/*
 !output/.gitkeep
+assets/sfx/*.wav
+assets/sfx/catalog.sqlite3*
+!assets/sfx/.gitkeep
+temp/*
+!temp/.gitkeep
 .env
 !.env.example
 

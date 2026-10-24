@@ -6,13 +6,26 @@ services:
     environment:
       NARRATOR_GENDER: "${NARRATOR_GENDER:-female}"
       AUDIO_ONLY: "${AUDIO_ONLY:-false}"
+      BRAIN_MODEL: "${BRAIN_MODEL:-qwen2.5:3b}"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      BRAIN_INSTRUCTIONS_FILE: "/app/brain-instructions.md"
     volumes:
       - ./inputs:/app/inputs:ro
       - ./output:/app/output
+      - ./assets:/app/assets
+      - ./temp:/app/temp
+      - ./brain-instructions.md:/app/brain-instructions.md:ro
     working_dir: /app
     stdin_open: true
     tty: true
     command: ["bash"]
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+    volumes:
+      - ollama-data:/root/.ollama
 
   torchserve:
     build:
@@ -42,3 +55,6 @@ services:
       - ./AnimatedDrawings/logs:/workspace/logs
     working_dir: /workspace
     entrypoint: ["python", "examples/image_to_animation.py"]
+
+volumes:
+  ollama-data:
