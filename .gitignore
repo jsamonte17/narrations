@@ -5,6 +5,7 @@ output/*
 assets/sfx/*.wav
 assets/sfx/catalog.sqlite3*
 !assets/sfx/.gitkeep
+assets/huggingface/
 temp/*
 !temp/.gitkeep
 .env

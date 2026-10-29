@@ -5,10 +5,13 @@ services:
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
     environment:
       NARRATOR_GENDER: "${NARRATOR_GENDER:-female}"
+      TTS_ENGINE: "${TTS_ENGINE:-edge}"
+      TTS_MODEL_ID: "${TTS_MODEL_ID:-facebook/mms-tts-tgl}"
       AUDIO_ONLY: "${AUDIO_ONLY:-false}"
       BRAIN_MODEL: "${BRAIN_MODEL:-qwen2.5:3b}"
       OLLAMA_BASE_URL: "http://ollama:11434"
       BRAIN_INSTRUCTIONS_FILE: "/app/brain-instructions.md"
+      HF_HOME: "/app/assets/huggingface"
     volumes:
       - ./inputs:/app/inputs:ro
       - ./output:/app/output

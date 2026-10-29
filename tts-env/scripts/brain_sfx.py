@@ -220,9 +220,14 @@ def annotate_paragraphs(
     primitive_assets = list(ASSET_CUES)
     catalog_asset_names = list(available_assets)
     prompt = (
-        "Sound-design Filipino narration. Return compact JSON with one annotation per "
-        "paragraph in input order. Fields: emotion, sounds, sound, layers. For known "
-        "effects, sounds is an ARRAY of 1-5 exact asset IDs from the catalog; sound is "
+        "Prepare Filipino narration for speech and sound design. Return compact JSON "
+        "with one annotation per paragraph in input order. Fields: emotion, tts_text, "
+        "sounds, sound, layers. In tts_text, preserve every original word, spelling, "
+        "capitalization, and word order exactly; adjust punctuation only to suggest "
+        "natural pauses and emotional delivery. Keep punctuation subtle and avoid "
+        "excessive ellipses or exclamation marks. Do not add stage directions or SSML. "
+        "For known effects, sounds is an ARRAY of 1-5 exact asset IDs from the catalog; "
+        "sound is "
         "an empty string and layers is empty. Order continuous background beds before "
         "sparse point events. If multiple audible sources are described or established, "
         "put each matching asset in sounds; do not collapse a multi-source scene to one "
@@ -233,7 +238,8 @@ def annotate_paragraphs(
         "because they fit the mood. For one important effect with no matching catalog "
         "asset, sounds is empty, sound is one short description, and layers contains "
         "1-3 best-fitting procedural IDs. Approximate it; do not claim it is a recording. "
-        "No narration text, indices, explanations, or extra keys. Return exactly "
+        "Do not include narration text outside tts_text, indices, explanations, or "
+        "extra keys. Return exactly "
         f"{len(paragraphs)} annotations.\n"
         f"Existing catalog: {list(available_assets.items())}\n"
         f"User guidance: {instructions}\n"
@@ -252,6 +258,7 @@ def annotate_paragraphs(
                     "type": "object",
                     "properties": {
                         "emotion": {"type": "string", "enum": list(EMOTIONS)},
+                        "tts_text": {"type": "string", "minLength": 1},
                         "sounds": {
                             "type": "array",
                             "items": {"type": "string", "enum": catalog_asset_names},
@@ -266,7 +273,13 @@ def annotate_paragraphs(
                             "maxItems": 3,
                         },
                     },
-                    "required": ["emotion", "sounds", "sound", "layers"],
+                    "required": [
+                        "emotion",
+                        "tts_text",
+                        "sounds",
+                        "sound",
+                        "layers",
+                    ],
                     "additionalProperties": False,
                 },
             }
@@ -284,7 +297,10 @@ def annotate_paragraphs(
                 "stream": False,
                 "options": {
                     "temperature": 0,
-                    "num_predict": min(192, 40 + 48 * len(paragraphs)),
+                    "num_predict": min(
+                        2048,
+                        max(192, 128 + sum(len(paragraph) for paragraph in paragraphs) // 2),
+                    ),
                 },
             }
         ).encode("utf-8"),
@@ -383,6 +399,7 @@ def annotate_paragraphs(
                 f"Ollama returned a malformed compact annotation for paragraph {position}."
             )
         emotion = item.get("emotion")
+        tts_text = item.get("tts_text")
         sounds = item.get("sounds")
         sound = item.get("sound")
         layers = item.get("layers")
@@ -392,6 +409,8 @@ def annotate_paragraphs(
         if (
             not isinstance(emotion, str)
             or emotion not in EMOTIONS
+            or not isinstance(tts_text, str)
+            or not tts_text.strip()
             or not isinstance(sound, str)
             or len(sound) > 80
             or not isinstance(sounds, list)
@@ -400,6 +419,16 @@ def annotate_paragraphs(
         ):
             raise RuntimeError(
                 f"Ollama returned an incomplete compact annotation for paragraph {position}."
+            )
+
+        tts_text = tts_text.strip()
+        word_pattern = r"[^\W_]+"
+        if re.findall(word_pattern, tts_text, flags=re.UNICODE) != re.findall(
+            word_pattern, paragraphs[position - 1], flags=re.UNICODE
+        ):
+            raise RuntimeError(
+                f"Ollama changed the narration words in paragraph {position}; "
+                "only punctuation changes are allowed."
             )
 
         sound = sound.strip()
@@ -430,7 +459,7 @@ def annotate_paragraphs(
             )
             if catalog_match is not None and not layers:
                 selected_assets = [catalog_match]
-                ordered_annotations.append((emotion, selected_assets))
+                ordered_annotations.append((emotion, selected_assets, tts_text))
                 continue
 
             if (
@@ -472,7 +501,7 @@ def annotate_paragraphs(
                         assets_dir,
                     )
                 ]
-        ordered_annotations.append((emotion, selected_assets))
+        ordered_annotations.append((emotion, selected_assets, tts_text))
     report_progress(f"AI analysis finished for '{part_title}'.")
     return ordered_annotations
 
@@ -495,7 +524,7 @@ def create_annotated_script(
             annotations = annotate_paragraphs(
                 batch, title, model, base_url, instructions, assets_dir
             )
-            for offset, (paragraph, (emotion, sfx)) in enumerate(
+            for offset, (paragraph, (emotion, sfx, tts_text)) in enumerate(
                 zip(batch, annotations), start=batch_start + 1
             ):
                 cue_assets = [
@@ -506,7 +535,7 @@ def create_annotated_script(
                     (
                         f"### [BAHAGI {part_number}: {title} - LINE {offset} - EMOTION: {emotion}]",
                         f"(AMBIENT SFX: {', '.join(cue_assets)})",
-                        paragraph,
+                        tts_text,
                         "",
                     )
                 )

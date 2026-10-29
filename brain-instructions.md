@@ -6,6 +6,10 @@ do not put the same ambience under every paragraph by default.
 
 Guidelines:
 
+- For each paragraph, preserve the original words, spelling, capitalization, and word
+  order exactly. The temporary TTS text may adjust punctuation only to suggest natural
+  pauses and emotional delivery. Keep punctuation subtle; do not add stage directions,
+  SSML, or words.
 - Keep spoken narration clear; ambience should support, not overpower, the voice.
 - Prefer existing reusable sound assets when they fit: `wind-gusting-soft`, `wind-gusting-hard`,
   `fire-cracking`, `waves-gentle`, `waves-crashing`, `river-flowing`,
@@ -34,6 +38,6 @@ Guidelines:
   add crickets as an outdoor-night bed when appropriate.
   Choose existing assets for ordinary settings; request a composite only when the scene
   calls for a distinct sound not represented by the existing library.
-- Keep the original narration wording unchanged. Return only the requested emotion,
-  supported asset names, and supported procedural layers for each paragraph. Do not
-  claim a procedural sound is a realistic recording or invent an unsupported primitive.
+- Return the requested emotion, punctuation-adjusted TTS text, supported asset names,
+  and supported procedural layers for each paragraph. Do not claim a procedural sound
+  is a realistic recording or invent an unsupported primitive.

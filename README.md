@@ -2,7 +2,7 @@
 
 This repository has two Docker-based workflows:
 
-1. **Narration app** — generates narrated MP3 audio or MP4 video with Edge TTS and optional emotion-aware ambient SFX.
+1. **Narration app** — generates narrated MP3 audio or MP4 video with Edge TTS or an optional local Tagalog MMS voice, plus optional ambient SFX.
 2. **AnimatedDrawings** — a separate image-to-animation pipeline for animating a supplied character drawing. It uses its own model service and assets.
 
 The workflows share one root Docker Compose file, but you only need to build or run the services for the workflow you want. No Python environment is installed on the host.
@@ -10,7 +10,7 @@ The workflows share one root Docker Compose file, but you only need to build or 
 ## Requirements
 
 - Docker Engine or Docker Desktop with the Docker Compose plugin.
-- Internet access when building images and when generating speech with Edge TTS.
+- Internet access when building images, generating speech with Edge TTS, or downloading the local MMS model on its first run.
 - On Linux, export your user and group IDs before running containers so generated files are owned by your host user:
 
   ```bash
@@ -40,7 +40,7 @@ For audio-only narration, scripts may be plain text without action tags. Tagged 
 
 ### Generate emotion-aware ambient sound
 
-For episode scripts with `BAHAGI` sections, narration-only output uses a local Ollama model to assign an emotion and SFX to each narration paragraph. The brain reuses an existing WAV when it fits or composes a new WAV by combining supported procedural sound primitives. New WAVs and their descriptions/layer recipes are saved under [`assets/sfx/`](./assets/sfx/) and indexed in a local SQLite catalog at `assets/sfx/catalog.sqlite3`, so future runs can match and reuse generated effects. This does not require an NVIDIA GPU or a separate audio-generation model. The app writes a temporary annotated script to `temp/<script-name>_annotated_sfx.txt`, showing the current part and paragraphs as pending while Ollama analyzes them, then replacing them with annotations when that part completes. FFmpeg then mixes each bed beneath its paragraph. The original input is never changed.
+For episode scripts with `BAHAGI` sections, narration-only output uses a local Ollama model to assign an emotion and SFX to each narration paragraph and to make punctuation-only adjustments to the temporary TTS text for more natural pauses and emphasis. It preserves the original words, spelling, capitalization, and order; it does not add acting directions or SSML, and punctuation does not guarantee a more expressive voice. The brain reuses an existing WAV when it fits or composes a new WAV by combining supported procedural sound primitives. New WAVs and their descriptions/layer recipes are saved under [`assets/sfx/`](./assets/sfx/) and indexed in a local SQLite catalog at `assets/sfx/catalog.sqlite3`, so future runs can match and reuse generated effects. This does not require an NVIDIA GPU or a separate audio-generation model. The app writes a temporary annotated script to `temp/<script-name>_annotated_sfx.txt`, showing the current part and paragraphs as pending while Ollama analyzes them, then replacing them with annotations and TTS-ready text when that part completes. FFmpeg then mixes each bed beneath its paragraph. The original input is never changed.
 
 For example, watch the annotations for `inputs/1_dayaw.txt` from another terminal with `tail -f temp/1_dayaw_annotated_sfx.txt`. The file is retained after the run and updated when each part's Ollama analysis completes.
 
@@ -53,7 +53,7 @@ docker compose exec ollama ollama pull qwen2.5:3b
 
 Generated effects are synthesized from built-in primitives such as wind, rain, water, fire, insects, drones, and magical tones. This is local procedural synthesis, not a new neural audio model; truly different sound physics require adding a new synthesis primitive.
 
-Customize the brain's sound-design guidance in [`brain-instructions.md`](./brain-instructions.md). The file is mounted read-only and read for every run. The Ollama brain and procedural WAV synthesis run locally; the separate Edge TTS narration step still needs internet access and sends narration text to that service.
+Customize the brain's sound-design and punctuation guidance in [`brain-instructions.md`](./brain-instructions.md). The file is mounted read-only and read for every run. The Ollama brain and procedural WAV synthesis run locally. Edge TTS requires internet access and sends the punctuation-adjusted narration text to that service; the optional MMS backend synthesizes locally after downloading its model.
 
 Run the episode:
 
@@ -64,7 +64,7 @@ docker compose run --rm tts-env \
   --audio-only
 ```
 
-The output is `output/1_dayaw.mp3`. The brain chooses existing assets or composes a new procedural sound from supported primitives when needed. Generated WAVs remain git-ignored. To use only the script's existing part-level cues without Ollama analysis, add `--no-ai-sfx`.
+The output is `output/1_dayaw.mp3`. The brain chooses existing assets or composes a new procedural sound from supported primitives when needed. Generated WAVs remain git-ignored. To skip Ollama analysis, add `--no-ai-sfx`; existing part-level cues are still used, while cue-free `BAHAGI` scripts produce narration without ambience.
 
 The narration command prints timestamped phase progress and a 15-second heartbeat while waiting for Ollama or Edge TTS. To monitor the Ollama service in a second terminal, use:
 
@@ -97,6 +97,8 @@ Copy [`.env.example`](./.env.example) to `.env` in the repository root if you wa
 
 ```dotenv
 NARRATOR_GENDER=female
+TTS_ENGINE=edge
+TTS_MODEL_ID=facebook/mms-tts-tgl
 AUDIO_ONLY=false
 BRAIN_MODEL=qwen2.5:3b
 ```
@@ -104,9 +106,24 @@ BRAIN_MODEL=qwen2.5:3b
 - `NARRATOR_GENDER` can be `female` or `male`. The default is `female`.
 - `AUDIO_ONLY` can be `true` for MP3-only output or `false` for a narrated MP4. The default is `false`.
 - `BRAIN_MODEL` selects the local Ollama model used to annotate episode paragraphs. The default is `qwen2.5:3b`.
+- `TTS_ENGINE` selects `edge` (default) or `mms` for local Tagalog synthesis; `--tts-engine` overrides it for one run.
+- `TTS_MODEL_ID` selects the Hugging Face model used by the local `mms` backend. It defaults to `facebook/mms-tts-tgl`.
 - Command-line `--voice female` / `--voice male` and `--audio-only` / `--video` flags override these defaults for one run.
 
 The Filipino Edge TTS voices are `fil-PH-BlessicaNeural` (female) and `fil-PH-AngeloNeural` (male). Speech generation requires an internet connection; narration text is sent to the online Edge TTS service.
+
+To try the locally hosted Tagalog MMS model instead, select the `mms` backend:
+
+```bash
+docker compose build tts-env
+docker compose run --rm tts-env \
+  python scripts/narration.py \
+  inputs/sample.txt \
+  --audio-only \
+  --tts-engine mms
+```
+
+The first run downloads the selected model automatically; later runs reuse its cache under `assets/huggingface/`. To try another model, change `TTS_MODEL_ID` in `.env`, for example to a Hugging Face repository ID, and run again—no code edit or image rebuild is needed. This backend currently supports only repositories compatible with Transformers `VitsModel` and `AutoTokenizer`; arbitrary Hugging Face TTS models are not interchangeable, and the checkpoint must support Tagalog. Check its model card, language quality, and license before use. The default MMS checkpoint runs on CPU, has one bundled voice, and offers no direct emotion controls. It is licensed CC-BY-NC 4.0, which restricts use to noncommercial purposes. The CPU-only PyTorch and Transformers dependencies make the TTS image larger.
 
 ### Build and generate a video
 
@@ -141,7 +158,7 @@ docker compose run --rm tts-env \
   --audio-only
 ```
 
-This creates `output/1_dayaw.mp3`. For a `BAHAGI` episode, Ollama analyzes each paragraph and chooses emotion-aware ambience; the annotated script is temporary and the original input remains unchanged. Start Ollama and pull the model as described in [Generate emotion-aware ambient sound](#generate-emotion-aware-ambient-sound) first. Add `--no-ai-sfx` to use only the script's existing part-level ambience cues. If `.env` has `AUDIO_ONLY=true`, the command creates an MP3 by default without needing `--audio-only`; pass `--video` to request a video instead. Conversely, `--audio-only` forces an MP3 when `AUDIO_ONLY=false`.
+This creates `output/1_dayaw.mp3`. For a `BAHAGI` episode, Ollama analyzes each paragraph and chooses emotion-aware ambience; the annotated script is temporary and the original input remains unchanged. Start Ollama and pull the model as described in [Generate emotion-aware ambient sound](#generate-emotion-aware-ambient-sound) first. Add `--no-ai-sfx` to skip Ollama analysis and use only existing part-level cues; cue-free `BAHAGI` scripts then produce narration without ambience. If `.env` has `AUDIO_ONLY=true`, the command creates an MP3 by default without needing `--audio-only`; pass `--video` to request a video instead. Conversely, `--audio-only` forces an MP3 when `AUDIO_ONLY=false`.
 
 To select a narrator for one run:
 

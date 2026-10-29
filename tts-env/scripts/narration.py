@@ -18,11 +18,21 @@ from PIL import Image, ImageDraw, ImageFont
 
 if __package__:
     from .brain_sfx import write_annotated_script
-    from .generate_ambient_sfx import PART_PATTERN, ensure_cue_assets, parse_parts
+    from .generate_ambient_sfx import (
+        CUE_PATTERN,
+        PART_PATTERN,
+        ensure_cue_assets,
+        parse_parts,
+    )
     from .progress import progress_heartbeat, report_progress
 else:
     from brain_sfx import write_annotated_script
-    from generate_ambient_sfx import PART_PATTERN, ensure_cue_assets, parse_parts
+    from generate_ambient_sfx import (
+        CUE_PATTERN,
+        PART_PATTERN,
+        ensure_cue_assets,
+        parse_parts,
+    )
     from progress import progress_heartbeat, report_progress
 
 
@@ -35,6 +45,7 @@ VOICE_IDS = {
     "female": "fil-PH-BlessicaNeural",
     "male": "fil-PH-AngeloNeural",
 }
+DEFAULT_TTS_MODEL_ID = "facebook/mms-tts-tgl"
 BACKGROUND = (247, 244, 235)
 INK = (29, 28, 27)
 PENCIL = (82, 78, 71)
@@ -60,15 +71,24 @@ def parse_scenes(script_text):
     return scenes
 
 
-def parse_audio_scenes(script_text):
+def parse_audio_scenes(script_text, allow_missing_part_cues=False):
     if PART_PATTERN.search(script_text):
-        parts = parse_parts(script_text)
         headers = list(PART_PATTERN.finditer(script_text))
+        sections = [
+            script_text[header.end():headers[index + 1].start()]
+            if index + 1 < len(headers)
+            else script_text[header.end():]
+            for index, header in enumerate(headers)
+        ]
+        cues_missing = all(CUE_PATTERN.search(section) is None for section in sections)
+        if allow_missing_part_cues and cues_missing:
+            parts = None
+        else:
+            parts = parse_parts(script_text)
         scenes = []
-        for index, (part_number, _, _) in enumerate(parts):
-            start = headers[index].end()
-            end = headers[index + 1].start() if index + 1 < len(headers) else len(script_text)
-            section = script_text[start:end]
+        for index, header in enumerate(headers):
+            part_number = int(header.group(1))
+            section = sections[index]
             section = re.sub(r"\(AMBIENT SFX:.*?\)", "", section, flags=re.IGNORECASE | re.DOTALL)
             section = re.sub(r"(?m)^\s*#+\s*.*$", "", section)
             narration = " ".join(section.split())
@@ -277,11 +297,55 @@ def render_frame(action, narration, phase):
     return image
 
 
-async def synthesize_scene_audio(scenes, voice, audio_directory):
+def load_hf_vits_tts():
+    try:
+        import torch
+        from scipy.io import wavfile
+        from transformers import AutoTokenizer, VitsModel
+    except ImportError as error:
+        raise RuntimeError(
+            "The local MMS TTS dependencies are missing. Rebuild the tts-env image "
+            "with 'docker compose build tts-env'."
+        ) from error
+
+    model_id = os.environ.get("TTS_MODEL_ID", DEFAULT_TTS_MODEL_ID).strip()
+    if not model_id:
+        raise ValueError("TTS_MODEL_ID must be a Hugging Face model ID.")
+    report_progress(
+        f"Loading local Hugging Face VITS model '{model_id}' "
+        "(first run downloads model files)."
+    )
+    try:
+        with progress_heartbeat(f"Loading local model '{model_id}'"):
+            tokenizer = AutoTokenizer.from_pretrained(model_id)
+            model = VitsModel.from_pretrained(model_id)
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            f"Could not load Hugging Face VITS model '{model_id}'. Verify that it "
+            "provides a compatible tokenizer and VitsModel checkpoint, and check "
+            f"internet access for its initial download: {error}"
+        ) from error
+    model.eval()
+    return torch, wavfile, tokenizer, model
+
+
+def synthesize_hf_vits_scene(torch, wavfile, tokenizer, model, narration, audio_path):
+    inputs = tokenizer(narration, return_tensors="pt")
+    with torch.inference_mode():
+        waveform = model(**inputs).waveform.squeeze().cpu().numpy()
+    wavfile.write(str(audio_path), rate=model.config.sampling_rate, data=waveform)
+
+
+async def synthesize_scene_audio(scenes, voice, audio_directory, engine):
     audio_paths = []
+    hf_vits_components = load_hf_vits_tts() if engine == "mms" else None
     for index, (_, narration) in enumerate(scenes):
-        audio_path = audio_directory / f"scene_{index:04d}.mp3"
-        report_progress(f"Generating narration audio {index + 1}/{len(scenes)} with Edge TTS.")
+        extension = ".wav" if engine == "mms" else ".mp3"
+        audio_path = audio_directory / f"scene_{index:04d}{extension}"
+        report_progress(
+            f"Generating narration audio {index + 1}/{len(scenes)} with "
+            f"{'local Hugging Face VITS TTS' if engine == 'mms' else 'Edge TTS'}."
+        )
         started_at = time.monotonic()
 
         async def report_elapsed(scene_number):
@@ -295,7 +359,15 @@ async def synthesize_scene_audio(scenes, voice, audio_directory):
 
         heartbeat = asyncio.create_task(report_elapsed(index + 1))
         try:
-            await edge_tts.Communicate(narration, voice).save(str(audio_path))
+            if engine == "mms":
+                await asyncio.to_thread(
+                    synthesize_hf_vits_scene,
+                    *hf_vits_components,
+                    narration,
+                    audio_path,
+                )
+            else:
+                await edge_tts.Communicate(narration, voice).save(str(audio_path))
         finally:
             heartbeat.cancel()
             try:
@@ -449,13 +521,25 @@ def main():
     )
     parser.add_argument(
         "--voice",
-        default=os.environ.get("NARRATOR_GENDER", "female"),
+        default=None,
         help="Narrator gender (female or male); defaults to NARRATOR_GENDER or female",
+    )
+    parser.add_argument(
+        "--tts-engine",
+        choices=("edge", "mms"),
+        default=os.environ.get("TTS_ENGINE", "edge").strip().lower(),
+        help=(
+            "Speech backend: edge (online neural voices) or mms "
+            "(local Hugging Face VITS-compatible model; see its license)"
+        ),
     )
     parser.add_argument(
         "--no-ai-sfx",
         action="store_true",
-        help="Use the script's existing part-level SFX cues instead of local Ollama annotations",
+        help=(
+            "Skip local Ollama analysis and use existing part-level cues, if present; "
+            "cue-free BAHAGI scripts remain narration-only"
+        ),
     )
     args = parser.parse_args()
     configured_audio_only = os.environ.get("AUDIO_ONLY", "false").strip().lower()
@@ -466,9 +550,14 @@ def main():
         if args.audio_only is not None
         else configured_audio_only in {"true", "1", "yes", "on"}
     )
-    voice = VOICE_IDS.get(args.voice.lower())
-    if voice is None:
+    narrator_gender = args.voice or os.environ.get("NARRATOR_GENDER", "female")
+    voice = VOICE_IDS.get(narrator_gender.lower())
+    if args.tts_engine == "edge" and voice is None:
         parser.error("--voice must be 'female' or 'male'.")
+    if args.tts_engine == "mms" and args.voice is not None:
+        parser.error(
+            "--voice applies only to --tts-engine edge; the local model provides its voice."
+        )
     script_path = args.script
     expected_extension = ".mp3" if audio_only else ".mp4"
     output_path = args.output or Path("output") / f"{script_path.stem}{expected_extension}"
@@ -484,7 +573,10 @@ def main():
             f"for {script_path}."
         )
         if audio_only and not use_ai_sfx:
-            scenes, episode_parts = parse_audio_scenes(script_text)
+            scenes, episode_parts = parse_audio_scenes(
+                script_text,
+                allow_missing_part_cues=args.no_ai_sfx,
+            )
         elif not audio_only:
             scenes = parse_scenes(script_text)
         with tempfile.TemporaryDirectory(prefix="stickman-video-") as temporary_directory:
@@ -518,9 +610,11 @@ def main():
                 report_progress(
                     f"Temporary annotations produced {len(scenes)} narration section(s)."
                 )
-            report_progress(f"Starting Edge TTS for {len(scenes)} narration section(s).")
+            report_progress(
+                f"Starting {args.tts_engine.upper()} TTS for {len(scenes)} narration section(s)."
+            )
             audio_paths = asyncio.run(
-                synthesize_scene_audio(scenes, voice, audio_directory)
+                synthesize_scene_audio(scenes, voice, audio_directory, args.tts_engine)
             )
             if audio_only:
                 if episode_parts is None:
