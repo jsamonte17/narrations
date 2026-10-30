@@ -1,4 +1,4 @@
-inputs/*
+# inputs/*
 !inputs/dayaw_actions.txt
 output/*
 !output/.gitkeep

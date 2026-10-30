@@ -173,6 +173,46 @@ The output extension follows the selected mode (`.mp4` for video or `.mp3` for a
 
 More detail about the stickman renderer is in [`tts-env/README.md`](./tts-env/README.md).
 
+### Make a music video from one image and a lightning clip
+
+This example uses your background image, loops your lightning clip, and uses your
+song to determine the output duration. The effect is scaled to 700 pixels wide,
+placed near the bottom of the frame, and Screen-blended over the image. If the
+effect extends above the frame, the top is clipped.
+
+> **This command runs FFmpeg directly on your host computer. It does not run inside
+> Docker and does not use the project's Docker image.** Install FFmpeg on the host
+> first, then run this from the repository root.
+
+```bash
+mkdir -p output
+ffmpeg \
+  -loop 1 -framerate 30 -i inputs/TakbongPogiLang.jpeg \
+  -stream_loop -1 -i inputs/distant_lightning_effect.mp4 \
+  -i inputs/BintanaAtHangin.m4a \
+  -filter_complex \
+  "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,setsar=1[bg];[1:v]scale=700:-1,fps=30,setsar=1[fx];color=c=black:s=1920x1080:r=30[canvas];[canvas][fx]overlay=x=900:y=H-h[placed];[bg][placed]blend=all_mode=screen:all_opacity=0.65,format=yuv420p[v]" \
+  -map "[v]" -map 2:a:0 \
+  -c:v libx264 -preset medium -crf 18 \
+  -c:a aac -b:a 256k -shortest -movflags +faststart \
+  output/BintanaAtHangin.mp4
+```
+
+`scale=700:-1` sets the effect width while preserving its aspect ratio; change `700`
+to resize it. `x=900` sets its horizontal position. `y=H-h` anchors its bottom to the
+bottom of the frame, clipping any part that extends above the top. `all_opacity=0.65`
+controls the effect strength; adjust it between `0` and `1`. Screen blending works
+best with bright lightning against a dark or black background.
+
+Choose one audio option in the command:
+
+- **High-quality AAC (shown above):** `-c:a aac -b:a 256k`. This re-encodes the
+  music, with a high bitrate for broad MP4 compatibility.
+- **Preserve the original audio stream:** replace those flags with `-c:a copy`.
+  This avoids re-encoding, so the audio stream is unchanged. It works only if the
+  source codec is supported in MP4; if FFmpeg reports a codec/container error, use
+  the AAC option above instead.
+
 ## AnimatedDrawings image-to-animation
 
 This is a separate workflow from the original stickman video generator. It uses AnimatedDrawings' image-to-animation models to infer a rig from a supplied drawing. It does not synthesize narration audio.
